@@ -310,7 +310,6 @@ jobs:
 
           "$BUILD_TOOLS/zipalign" -f -p 4 \
             build/patched-with-helper.apk \
-
             build/aligned.apk
 
       - name: Sign APK
