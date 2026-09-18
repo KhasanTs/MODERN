@@ -1,11 +1,13 @@
-name: RuVideoHub 3.6.21 - Smart Search + No Updates
+﻿name: RuVideoHub 3.6.21 - Smart Search + No Updates
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -21,6 +23,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -34,21 +37,91 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -s input/RuVideoHub_3.6.21.apk
-          echo "Input APK:"; stat -c '%n - %s bytes' input/RuVideoHub_3.6.21.apk
-          echo "DEX files:"; unzip -l input/RuVideoHub_3.6.21.apk | grep -E 'classes[0-9]*\\.dex$'
+
+          APK="input/RuVideoHub_3.6.21.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK not found: $APK"
+            exit 1
+          fi
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK is empty"
+            exit 1
+          fi
+
+          echo "Input APK:"
+          stat -c '%n - %s bytes' "$APK"
+
+          echo ""
+          echo "Reading APK ZIP structure with Python..."
+
+          python3 - "$APK" <<'PY'
+          import sys
+          import zipfile
+
+          apk = sys.argv[1]
+
+          try:
+              with zipfile.ZipFile(apk, "r") as z:
+                  names = z.namelist()
+          except Exception as e:
+              print("ERROR: Cannot read APK as ZIP:")
+              print(e)
+              sys.exit(1)
+
+          dex = [
+              n for n in names
+              if n == "classes.dex"
+              or (
+                  n.startswith("classes")
+                  and n.endswith(".dex")
+                  and n[7:-4].isdigit()
+              )
+          ]
+
+          print("DEX files:")
+          for name in dex:
+              print("  " + name)
+
+          if not dex:
+              print("")
+              print("ERROR: APK contains no classes*.dex files")
+              print("")
+              print("First ZIP entries:")
+              for name in names[:100]:
+                  print("  " + name)
+              sys.exit(1)
+
+          if "classes2.dex" not in dex:
+              print("")
+              print("ERROR: classes2.dex is required by the exact patch.")
+              print("")
+              print("Available DEX files:")
+              for name in dex:
+                  print("  " + name)
+              sys.exit(1)
+
+          print("")
+          print("classes2.dex FOUND")
+          print("DEX verification OK")
+          PY
 
       - name: Download smali tools 3.0.10
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p tools
+
           curl -fL --retry 5 --retry-all-errors \
             -o tools/baksmali.jar \
             https://github.com/baksmali/smali/releases/download/3.0.10/baksmali-3.0.10-fat-release.jar
+
           curl -fL --retry 5 --retry-all-errors \
             -o tools/smali.jar \
             https://github.com/baksmali/smali/releases/download/3.0.10/smali-3.0.10-fat-release.jar
+
           java -jar tools/baksmali.jar --version
           java -jar tools/smali.jar --version
 
@@ -56,108 +129,200 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf build
-          mkdir -p build/original-dex build/classes2-smali
-          unzip -p input/RuVideoHub_3.6.21.apk classes2.dex > build/original-dex/classes2.dex
+
+          mkdir -p build/original-dex
+          mkdir -p build/classes2-smali
+
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          apk = Path("input/RuVideoHub_3.6.21.apk")
+          out = Path("build/original-dex/classes2.dex")
+
+          with zipfile.ZipFile(apk, "r") as z:
+              data = z.read("classes2.dex")
+
+          if not data:
+              raise SystemExit("ERROR: classes2.dex is empty")
+
+          out.write_bytes(data)
+
+          print(f"Extracted {out}")
+          print(f"Size: {len(data)} bytes")
+          PY
+
           test -s build/original-dex/classes2.dex
-          stat -c '%n - %s bytes' build/original-dex/classes2.dex
 
       - name: Disassemble classes2.dex
         shell: bash
         run: |
           set -euo pipefail
+
           java -jar tools/baksmali.jar disassemble \
             build/original-dex/classes2.dex \
             -o build/classes2-smali
-          test -f build/classes2-smali/com/example/viewmodel/'VideoViewModel$filteredVideos$1.smali'
-          test -f build/classes2-smali/com/example/data/VideoRepository.smali
-          test -f build/classes2-smali/com/example/ui/screens/home/components/HomeHeaderKt.smali
-          test -f build/classes2-smali/com/example/ui/screens/library/LibraryTabScreenKt.smali
-          test -f build/classes2-smali/com/example/ui/screens/UpdateSectionKt.smali
-          test -f build/classes2-smali/com/example/manager/UpdateManager.smali
+
+          test -f "build/classes2-smali/com/example/viewmodel/VideoViewModel\$filteredVideos\$1.smali"
+          test -f "build/classes2-smali/com/example/data/VideoRepository.smali"
+          test -f "build/classes2-smali/com/example/ui/screens/home/components/HomeHeaderKt.smali"
+          test -f "build/classes2-smali/com/example/ui/screens/library/LibraryTabScreenKt.smali"
+          test -f "build/classes2-smali/com/example/ui/screens/UpdateSectionKt.smali"
+          test -f "build/classes2-smali/com/example/manager/UpdateManager.smali"
+
           echo "Exact target classes present."
 
       - name: Apply exact search and update patches
         shell: bash
         run: |
           set -euo pipefail
+
           python3 patch/patch_smali.py build/classes2-smali
 
       - name: Assemble patched classes2.dex
         shell: bash
         run: |
           set -euo pipefail
+
           java -jar tools/smali.jar assemble \
             build/classes2-smali \
             -o build/classes2-patched.dex
+
           test -s build/classes2-patched.dex
+
           stat -c '%n - %s bytes' build/classes2-patched.dex
 
       - name: Compile SmartSearch bridge
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build/helper-classes build/helper-dex
+
+          mkdir -p build/helper-classes
+          mkdir -p build/helper-dex
+
           javac -source 11 -target 11 \
             -d build/helper-classes \
             patch/SmartSearchBridge.java
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
-          ANDROID_JAR="$(find "$ANDROID_HOME/platforms" -name android.jar | sort -V | tail -n1)"
+
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | sort -V \
+            | tail -n1)"
+
+          ANDROID_JAR="$(find "$ANDROID_HOME/platforms" \
+            -name android.jar \
+            | sort -V \
+            | tail -n1)"
+
           test -x "$BUILD_TOOLS/d8"
           test -f "$ANDROID_JAR"
+
           "$BUILD_TOOLS/d8" \
             --min-api 24 \
             --lib "$ANDROID_JAR" \
             --output build/helper-dex \
             build/helper-classes/com/example/utils/SmartSearchBridge.class
+
           test -s build/helper-dex/classes.dex
 
       - name: Replace only classes2.dex
         shell: bash
         run: |
           set -euo pipefail
+
           python3 - <<'PY'
           from pathlib import Path
           import zipfile
-          src = Path('input/RuVideoHub_3.6.21.apk')
-          new_dex = Path('build/classes2-patched.dex')
-          out = Path('build/patched-stage.apk')
-          with zipfile.ZipFile(src, 'r') as zin, zipfile.ZipFile(out, 'w') as zout:
+
+          src = Path("input/RuVideoHub_3.6.21.apk")
+          new_dex = Path("build/classes2-patched.dex")
+          out = Path("build/patched-stage.apk")
+
+          with zipfile.ZipFile(src, "r") as zin, \
+               zipfile.ZipFile(out, "w") as zout:
+
               for info in zin.infolist():
-                  if info.filename == 'classes2.dex':
-                      zout.writestr(info, new_dex.read_bytes(), compress_type=zipfile.ZIP_STORED)
+
+                  if info.filename == "classes2.dex":
+                      zout.writestr(
+                          info,
+                          new_dex.read_bytes(),
+                          compress_type=zipfile.ZIP_STORED
+                      )
                   else:
-                      zout.writestr(info, zin.read(info.filename))
+                      zout.writestr(
+                          info,
+                          zin.read(info.filename)
+                      )
+
           print(out)
           PY
+
           test -s build/patched-stage.apk
 
       - name: Inject SmartSearch bridge as new dex
         shell: bash
         run: |
           set -euo pipefail
+
           python3 scripts/add_dex.py \
             build/patched-stage.apk \
             build/helper-dex/classes.dex \
             build/patched-with-helper.apk
+
           test -s build/patched-with-helper.apk
-          unzip -l build/patched-with-helper.apk | grep -E 'classes[0-9]*\\.dex$'
+
+          echo "DEX files after helper injection:"
+
+          python3 - <<'PY'
+          import zipfile
+
+          with zipfile.ZipFile("build/patched-with-helper.apk", "r") as z:
+              dex = [
+                  n for n in z.namelist()
+                  if n == "classes.dex"
+                  or (
+                      n.startswith("classes")
+                      and n.endswith(".dex")
+                      and n[7:-4].isdigit()
+                  )
+              ]
+
+          for name in dex:
+              print(name)
+          PY
 
       - name: Align APK
         shell: bash
         run: |
           set -euo pipefail
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | sort -V \
+            | tail -n1)"
+
           "$BUILD_TOOLS/zipalign" -f -p 4 \
             build/patched-with-helper.apk \
             build/aligned.apk
-          "$BUILD_TOOLS/zipalign" -c -P 16 -v 4 build/aligned.apk
+
+          "$BUILD_TOOLS/zipalign" \
+            -c -P 16 -v 4 \
+            build/aligned.apk
 
       - name: Sign APK
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p build/signing
+
           keytool -genkeypair \
             -keystore build/signing/patch-debug.jks \
             -storepass android \
@@ -167,7 +332,14 @@ jobs:
             -keysize 2048 \
             -validity 10000 \
             -dname 'CN=Android Debug,O=Android,C=US'
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | sort -V \
+            | tail -n1)"
+
           "$BUILD_TOOLS/apksigner" sign \
             --ks build/signing/patch-debug.jks \
             --ks-key-alias androiddebugkey \
@@ -175,31 +347,84 @@ jobs:
             --key-pass pass:android \
             --out build/RuVideoHub-3.6.21-smart-search-no-update.apk \
             build/aligned.apk
-          "$BUILD_TOOLS/apksigner" verify --verbose build/RuVideoHub-3.6.21-smart-search-no-update.apk
+
+          "$BUILD_TOOLS/apksigner" verify \
+            --verbose \
+            build/RuVideoHub-3.6.21-smart-search-no-update.apk
 
       - name: Final verification
         shell: bash
         run: |
           set -euo pipefail
-          APK=build/RuVideoHub-3.6.21-smart-search-no-update.apk
-          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)"
+
+          APK="build/RuVideoHub-3.6.21-smart-search-no-update.apk"
+
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            | sort -V \
+            | tail -n1)"
+
           test -s "$APK"
-          echo '=== APK ==='
+
+          echo "=== APK ==="
           stat -c '%n - %s bytes' "$APK"
-          "$BUILD_TOOLS/aapt2" dump packagename "$APK"
-          echo '=== DEX ==='
-          unzip -l "$APK" | grep -E 'classes[0-9]*\\.dex$'
-          echo '=== SmartSearch reference ==='
-          unzip -p "$APK" classes2.dex | strings | grep -m1 'SmartSearchBridge' || true
-          echo '=== UpdateManager reference ==='
-          for dex in $(unzip -Z1 "$APK" | grep -E '^classes[0-9]*\\.dex$'); do
-            unzip -p "$APK" "$dex" | strings | grep -m1 'checkForUpdates' && echo "found in $dex" || true
-          done
+
+          "$BUILD_TOOLS/aapt2" \
+            dump packagename \
+            "$APK"
+
+          echo "=== DEX ==="
+
+          python3 - <<'PY'
+          import zipfile
+
+          apk = "build/RuVideoHub-3.6.21-smart-search-no-update.apk"
+
+          with zipfile.ZipFile(apk, "r") as z:
+              dex = [
+                  n for n in z.namelist()
+                  if n == "classes.dex"
+                  or (
+                      n.startswith("classes")
+                      and n.endswith(".dex")
+                      and n[7:-4].isdigit()
+                  )
+              ]
+
+          for name in dex:
+              print(name)
+          PY
+
+          echo "=== SmartSearch reference ==="
+
+          python3 - <<'PY'
+          import zipfile
+
+          apk = "build/RuVideoHub-3.6.21-smart-search-no-update.apk"
+
+          with zipfile.ZipFile(apk, "r") as z:
+              found = False
+
+              for name in z.namelist():
+                  if name.endswith(".dex"):
+                      data = z.read(name)
+
+                      if b"SmartSearchBridge" in data:
+                          print("found in " + name)
+                          found = True
+
+              if not found:
+                  raise SystemExit("ERROR: SmartSearchBridge reference not found")
+          PY
+
+          echo "=== Final verification OK ==="
 
       - name: Upload patched APK
         uses: actions/upload-artifact@v4
         with:
-          name: RuVideoHub-3.6.21-smart-search-no-update-v3
+          name: RuVideoHub-3.6.21-smart-search-no-update-v4
           path: build/RuVideoHub-3.6.21-smart-search-no-update.apk
           if-no-files-found: error
           retention-days: 30
