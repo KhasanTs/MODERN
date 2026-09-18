@@ -1,177 +1,244 @@
 #!/usr/bin/env python3
-import pathlib
+from __future__ import annotations
+
+import re
 import sys
+from pathlib import Path
 
-ROOT = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".").resolve()
+KOTLIN = "Lkotlin/text/StringsKt;->j(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Z)Z"
+SMART = "Lcom/example/utils/SmartSearchBridge;->containsSmart(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Z)Z"
 
-def find_unique(name):
-    hits = [p for p in ROOT.rglob(name) if "original" not in p.parts]
-    exact = [p for p in hits if "/com/example/" in p.as_posix().replace("\\", "/")]
-    if len(exact) == 1:
-        return exact[0]
-    if len(hits) == 1:
-        return hits[0]
-    if not hits:
-        raise SystemExit(f"ERROR: target smali not found: {name}")
-    raise SystemExit("ERROR: ambiguous target smali:\n" + "\n".join(map(str, hits)))
 
-def replace_region(lines, start_pred, end_pred, replacement, label):
-    start = next((i for i,l in enumerate(lines) if start_pred(l)), None)
-    if start is None:
-        raise SystemExit(f"ERROR: {label}: start marker not found")
-    end = None
-    for i in range(start, len(lines)):
-        if end_pred(lines[i]):
-            end = i
-            break
-    if end is None:
-        raise SystemExit(f"ERROR: {label}: end marker not found")
-    return lines[:start] + replacement.strip("\n").splitlines() + lines[end+1:]
+def read(path: Path) -> list[str]:
+    return path.read_text(encoding="utf-8", errors="replace").splitlines()
 
-def patch_viewmodel():
-    p = find_unique("VideoViewModel$filteredVideos$1.smali")
-    lines = p.read_text(encoding="utf-8").splitlines()
-    # Exact search block discovered in the supplied 3.6.21 decompiler dump.
-    new = [
-        '    invoke-virtual {v2}, Lcom/example/data/Video;->getTitle()Ljava/lang/String;',
-        '    move-result-object v3',
-        '',
-        '    invoke-virtual {v2}, Lcom/example/data/Video;->getChannel()Ljava/lang/String;',
-        '    move-result-object v2',
-        '',
-        '    invoke-static {v1, v3, v2}, Lcom/example/utils/SmartSearch;->matches(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z',
-        '    move-result v2',
-        '',
-        '    if-eqz v2, :cond_70',
-    ]
-    lines = replace_region(
+
+def write(path: Path, lines: list[str]) -> None:
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def method_blocks(lines: list[str]):
+    blocks = []
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith(".method"):
+            start = i
+            j = i + 1
+            while j < len(lines) and lines[j].strip() != ".end method":
+                j += 1
+            if j >= len(lines):
+                raise RuntimeError(f"Unclosed method beginning at line {start+1}")
+            blocks.append((start, j, lines[start:j+1]))
+            i = j + 1
+        else:
+            i += 1
+    return blocks
+
+
+def find_unique(root: Path, filename: str) -> Path:
+    hits = sorted(p for p in root.rglob(filename) if p.is_file())
+    if len(hits) != 1:
+        raise SystemExit(
+            f"ERROR: expected exactly one {filename}, found {len(hits)}\n" +
+            "\n".join(str(p) for p in hits)
+        )
+    return hits[0]
+
+
+def patch_after_get(lines: list[str], start_marker: str, label: str) -> int:
+    """Patch the first Kotlin ignore-case contains call found after any occurrence of a marker.
+
+    The same helper/getter may occur in several generated Compose methods, so we do not
+    blindly select the last occurrence. We choose the occurrence whose containing method
+    actually has a following Kotlin contains call.
+    """
+    candidates = [i for i, line in enumerate(lines) if start_marker in line]
+    if not candidates:
+        raise SystemExit(f"ERROR: {label}: marker not found: {start_marker}")
+    for start in candidates:
+        for i in range(start + 1, len(lines)):
+            if lines[i].strip() == ".end method":
+                break
+            if KOTLIN in lines[i]:
+                lines[i] = lines[i].replace(KOTLIN, SMART)
+                return 1
+    raise SystemExit(f"ERROR: {label}: Kotlin contains call after marker not found")
+
+
+def patch_viewmodel(root: Path) -> int:
+    p = find_unique(root, "VideoViewModel$filteredVideos$1.smali")
+    lines = read(p)
+    # There are URL/domain checks before the actual title/channel search. We patch
+    # only the contains call immediately after getTitle() and the one after getChannel().
+    count = 0
+    count += patch_after_get(
         lines,
-        lambda l: l.strip() == 'invoke-virtual {v2}, Lcom/example/data/Video;->getTitle()Ljava/lang/String;',
-        lambda l: l.strip() == 'if-eqz v2, :cond_70',
-        "\n".join(new),
-        "VideoViewModel search"
+        "Lcom/example/data/Video;->getTitle()Ljava/lang/String;",
+        "VideoViewModel title search",
     )
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return p
-
-def patch_home():
-    p = find_unique("HomeHeaderKt.smali")
-    lines = p.read_text(encoding="utf-8").splitlines()
-    new = [
-        '    invoke-virtual {v17}, Lcom/example/data/SearchHistory;->getQuery()Ljava/lang/String;',
-        '    move-result-object v0',
-        '',
-        '    invoke-static {v1, v0}, Lcom/example/utils/SmartSearch;->matches(Ljava/lang/String;Ljava/lang/String;)Z',
-        '    move-result v0',
-        '',
-        '    if-eqz v0, :cond_29d',
-    ]
-    lines = replace_region(
+    count += patch_after_get(
         lines,
-        lambda l: l.strip().startswith('invoke-virtual/range {v17') and 'SearchHistory;->getQuery()Ljava/lang/String;' in l,
-        lambda l: l.strip() == 'if-eqz v0, :cond_29d',
-        "\n".join(new),
-        "HomeHeader search"
+        "Lcom/example/data/Video;->getChannel()Ljava/lang/String;",
+        "VideoViewModel channel search",
     )
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return p
+    write(p, lines)
+    return count
 
-def patch_library():
-    p = find_unique("LibraryTabScreenKt.smali")
-    lines = p.read_text(encoding="utf-8").splitlines()
-    # Start at the title read belonging to the saved-video filter.
-    starts = [i for i,l in enumerate(lines) if l.strip() == 'invoke-virtual {v13}, Lcom/example/data/SavedVideo;->getTitle()Ljava/lang/String;']
-    if not starts:
-        raise SystemExit(f"ERROR: Library search start not found in {p}")
-    start = starts[-1]
-    end = None
-    for i in range(start, len(lines)):
-        if lines[i].strip() == 'if-eqz v13, :cond_76b':
-            end = i
+
+def patch_repository(root: Path) -> int:
+    p = find_unique(root, "VideoRepository.smali")
+    lines = read(p)
+    blocks = method_blocks(lines)
+    # Only the private fallbackToLocal method is a local search fallback.
+    target = None
+    for start, end, block in blocks:
+        if block[0].startswith(".method private final fallbackToLocal("):
+            target = (start, end)
             break
-    if end is None:
-        raise SystemExit(f"ERROR: Library search end not found in {p}")
-    new = [
-        '    invoke-virtual {v13}, Lcom/example/data/SavedVideo;->getTitle()Ljava/lang/String;',
-        '    move-result-object v14',
-        '',
-        '    invoke-static/range {v30 .. v30}, Lcom/example/ui/screens/library/LibraryTabScreenKt;->b(Landroidx/compose/runtime/MutableState;)Ljava/lang/String;',
-        '    move-result-object v15',
-        '',
-        '    invoke-virtual {v13}, Lcom/example/data/SavedVideo;->getChannel()Ljava/lang/String;',
-        '    move-result-object v13',
-        '',
-        '    invoke-static {v15, v14, v13}, Lcom/example/utils/SmartSearch;->matches(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z',
-        '    move-result v13',
-        '',
-        '    if-eqz v13, :cond_76b',
-    ]
-    lines = lines[:start] + new + lines[end+1:]
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return p
+    if target is None:
+        raise SystemExit("ERROR: VideoRepository fallbackToLocal method not found")
+    start, end = target
+    sub = lines[start:end+1]
+    count = 0
+    count += patch_after_get(sub, "Lcom/example/data/Video;->getTitle()Ljava/lang/String;", "VideoRepository title search")
+    count += patch_after_get(sub, "Lcom/example/data/Video;->getChannel()Ljava/lang/String;", "VideoRepository channel search")
+    lines[start:end+1] = sub
+    write(p, lines)
+    return count
 
-def patch_update():
-    p = find_unique("UpdateSectionKt.smali")
-    lines = p.read_text(encoding="utf-8").splitlines()
 
-    def noop_method(method_signature, label):
-        nonlocal lines
-        start_i = next((i for i,l in enumerate(lines)
-                        if l.strip() == method_signature), None)
-        if start_i is None:
-            raise SystemExit(f"ERROR: {label}: method start not found in {p}")
-        end_i = next((i for i in range(start_i + 1, len(lines))
-                      if lines[i].strip() == '.end method'), None)
-        if end_i is None:
-            raise SystemExit(f"ERROR: {label}: method end not found in {p}")
-        new_block = [
-            method_signature,
-            '    .registers 3',
-            '',
-            f'    # Disabled in patched build: {label}.',
-            '    return-void',
-            '.end method'
-        ]
-        lines = lines[:start_i] + new_block + lines[end_i + 1:]
+def patch_home(root: Path) -> int:
+    p = find_unique(root, "HomeHeaderKt.smali")
+    lines = read(p)
+    count = patch_after_get(
+        lines,
+        "SearchHistory;->getQuery()Ljava/lang/String;",
+        "HomeHeader search history",
+    )
+    write(p, lines)
+    return count
 
-    noop_method(
-        '.method public static final a(ZLandroidx/compose/runtime/Composer;I)V',
-        'GlobalUpdateChecker / update prompt entry point'
+
+def patch_library(root: Path) -> int:
+    p = find_unique(root, "LibraryTabScreenKt.smali")
+    lines = read(p)
+    # The first two StringsKt.j calls near line ~670 are only duration formatting ("ч"/"h").
+    # The actual library search is the pair immediately following SavedVideo.getTitle()/getChannel().
+    count = 0
+    count += patch_after_get(
+        lines,
+        "Lcom/example/data/SavedVideo;->getTitle()Ljava/lang/String;",
+        "Library title search",
+    )
+    count += patch_after_get(
+        lines,
+        "Lcom/example/data/SavedVideo;->getChannel()Ljava/lang/String;",
+        "Library channel search",
+    )
+    write(p, lines)
+    return count
+
+
+def find_exact_method(lines: list[str], signature: str):
+    for start, end, block in method_blocks(lines):
+        if block[0].strip() == signature:
+            return start, end, block
+    return None
+
+
+def get_regs(block: list[str]) -> str:
+    for line in block:
+        s = line.strip()
+        if s.startswith(".registers ") or s.startswith(".locals "):
+            return line
+    raise SystemExit("ERROR: method has no .registers/.locals directive")
+
+
+def disable_method(path: Path, signature: str, label: str, return_kind: str) -> int:
+    lines = read(path)
+    target = find_exact_method(lines, signature)
+    if target is None:
+        raise SystemExit(f"ERROR: {label}: method not found: {signature}")
+    start, end, old = target
+    regs = get_regs(old)
+    if return_kind == "void":
+        repl = [old[0], regs, f"    # Disabled by SmartSearch/no-update patch: {label}", "    return-void", ".end method"]
+    elif return_kind == "object":
+        repl = [old[0], regs, f"    # Disabled by SmartSearch/no-update patch: {label}", "    const/4 v0, 0x0", "    return-object v0", ".end method"]
+    else:
+        raise ValueError(return_kind)
+    lines[start:end+1] = repl
+    write(path, lines)
+    return 1
+
+
+def patch_updates(root: Path) -> int:
+    p = find_unique(root, "UpdateSectionKt.smali")
+    total = 0
+    total += disable_method(
+        p,
+        ".method public static final a(ZLandroidx/compose/runtime/Composer;I)V",
+        "GlobalUpdateChecker entry point",
+        "void",
+    )
+    total += disable_method(
+        p,
+        ".method public static final c(Lcom/example/viewmodel/VideoViewModel;ZZLandroidx/compose/runtime/Composer;I)V",
+        "UpdateSection settings UI",
+        "void",
+    )
+    return total
+
+
+def patch_manager(root: Path) -> int:
+    p = find_unique(root, "UpdateManager.smali")
+    return disable_method(
+        p,
+        ".method public final checkForUpdates(Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;",
+        "UpdateManager.checkForUpdates",
+        "object",
     )
 
-    noop_method(
-        '.method public static final c(Lcom/example/viewmodel/VideoViewModel;ZZLandroidx/compose/runtime/Composer;I)V',
-        'update settings section'
-    )
 
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return p
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: patch_smali.py <baksmali-output-dir>", file=sys.stderr)
+        return 2
+    root = Path(sys.argv[1]).resolve()
+    if not root.is_dir():
+        print(f"ERROR: no directory: {root}", file=sys.stderr)
+        return 2
 
-def patch_update_manager():
-    p = find_unique("UpdateManager.smali")
-    lines = p.read_text(encoding="utf-8").splitlines()
-    signature = '.method public final checkForUpdates(Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;'
-    start_i = next((i for i,l in enumerate(lines) if l.strip() == signature), None)
-    if start_i is None:
-        raise SystemExit(f"ERROR: UpdateManager checkForUpdates start not found in {p}")
-    end_i = next((i for i in range(start_i + 1, len(lines))
-                  if lines[i].strip() == '.end method'), None)
-    if end_i is None:
-        raise SystemExit(f"ERROR: UpdateManager checkForUpdates end not found in {p}")
-    new_block = [
-        signature,
-        '    .registers 3',
-        '',
-        '    # Disabled in patched build: never query for release updates.',
-        '    const/4 p0, 0x0',
-        '    return-object p0',
-        '.end method'
-    ]
-    lines = lines[:start_i] + new_block + lines[end_i + 1:]
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return p
+    counts = {
+        "VideoViewModel": patch_viewmodel(root),
+        "VideoRepository": patch_repository(root),
+        "HomeHeader": patch_home(root),
+        "LibraryTabScreen": patch_library(root),
+    }
+    update_ui = patch_updates(root)
+    update_manager = patch_manager(root)
 
-patched = [patch_viewmodel(), patch_home(), patch_library(), patch_update(), patch_update_manager()]
-print("PATCH_OK")
-for p in patched:
-    print(p)
+    search_total = sum(counts.values())
+    print("=== Smart Search patch ===")
+    for k, v in counts.items():
+        print(f"{k}: {v}")
+    print(f"SmartSearch call sites changed: {search_total}")
+    print(f"Updater UI methods disabled: {update_ui}")
+    print(f"UpdateManager checkForUpdates disabled: {update_manager}")
+
+    # Exact targets confirmed from the supplied decompiler dump of the user's APK.
+    if search_total != 7:
+        raise SystemExit(
+            f"ERROR: expected exactly 7 search call sites, patched {search_total}. Refusing to build."
+        )
+    if update_ui != 2:
+        raise SystemExit("ERROR: expected exactly 2 updater UI methods to be disabled. Refusing to build.")
+    if update_manager != 1:
+        raise SystemExit("ERROR: UpdateManager.checkForUpdates was not disabled. Refusing to build.")
+
+    print("PATCH_OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

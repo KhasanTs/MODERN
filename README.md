@@ -1,33 +1,18 @@
-# RuVideoHub 3.6.21 — exact APK patch (v2)
+# RuVideoHub 3.6.21 — exact APK patch v3
 
-Source of truth: the supplied official `RuVideoHub_3.6.21.apk`.
+This package is designed for the supplied official `RuVideoHub_3.6.21.apk` and does **not** replace its UI, player, navigation, or service modules with the older `fix-main` project.
 
-The supplied online-decompiler dump was inspected to identify the exact 3.6.21 bytecode structures. The patch is written against those real structures, not the older FIX project.
+Changes:
 
-Exact patched areas:
-- `VideoViewModel$filteredVideos$1.smali`: title/channel filtering -> SmartSearch.
-- `HomeHeaderKt.smali`: search-history filtering -> SmartSearch.
-- `LibraryTabScreenKt.smali`: saved-video filtering -> SmartSearch.
-- `UpdateSectionKt.smali`: update UI/global checker entry points disabled.
-- `UpdateManager.smali`: `checkForUpdates()` immediately returns null, so no release check can produce an update dialog.
+- SmartSearch is added from the user's FIX logic.
+- Exactly 7 confirmed search call sites are patched in the supplied 3.6.21 build:
+  - `VideoViewModel$filteredVideos$1`: title + channel
+  - `VideoRepository.fallbackToLocal`: title + channel
+  - `HomeHeaderKt`: search history
+  - `LibraryTabScreenKt`: saved-video title + channel
+- The two updater UI entry points in `UpdateSectionKt` are disabled.
+- `UpdateManager.checkForUpdates()` is disabled.
+- Only `classes2.dex` is disassembled/reassembled; `classes.dex` and original resources stay untouched.
+- `SmartSearchBridge` is compiled into an additional dex.
 
-SmartSearch mirrors the supplied FIX behavior:
-- case-insensitive matching;
-- `ё` normalized to `е`;
-- punctuation-insensitive tokenization;
-- stem/form tolerance;
-- typo tolerance using edit distance;
-- old `contains()` matches remain matches.
-
-GitHub Actions rebuilds the exact APK:
-1. decode with Apktool 3.0.3;
-2. apply exact smali patch;
-3. compile the SmartSearch helper to DEX;
-4. rebuild the APK;
-5. add helper as `classes3.dex`;
-6. zipalign;
-7. sign with a generated key;
-8. verify with `apksigner`;
-9. upload the final APK.
-
-The output uses a new signing certificate. An existing installation signed by a different key must be removed before installing the patched build.
+The workflow deliberately fails if the expected 7 search call sites or the 3 update-disabling targets are not found, instead of producing an unmodified APK.
