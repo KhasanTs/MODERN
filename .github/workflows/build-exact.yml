@@ -1,4 +1,4 @@
-name: RuVideoHub 3.6.21 - Smart Search + No Updates
+﻿name: RuVideoHub 3.6.21 - Smart Search + No Updates
 
 on:
   workflow_dispatch:
@@ -424,3 +424,4 @@ jobs:
           path: build/RuVideoHub-3.6.21-smart-search-no-update.apk
           if-no-files-found: error
           retention-days: 30
+
