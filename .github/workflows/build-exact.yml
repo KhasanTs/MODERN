@@ -204,7 +204,7 @@ jobs:
 
           javac -source 11 -target 11 \
             -d build/helper-classes \
-            patch/SmartSearchBridge.java
+            patch/SmartSearchBridge.java patch/M3uNormalizer.java
 
           BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" \
             -mindepth 1 \
@@ -225,7 +225,7 @@ jobs:
             --min-api 24 \
             --lib "$ANDROID_JAR" \
             --output build/helper-dex \
-            build/helper-classes/com/example/utils/SmartSearchBridge.class
+            build/helper-classes/com/example/utils/SmartSearchBridge.class build/helper-classes/com/example/utils/M3uNormalizer.class
 
           test -s build/helper-dex/classes.dex
 

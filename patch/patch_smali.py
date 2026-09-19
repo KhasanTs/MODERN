@@ -200,11 +200,169 @@ def patch_manager(root: Path) -> int:
     )
 
 
+
+def patch_m3u_parser(root):
+    parsers = list(root.rglob("M3uParser.smali"))
+
+    if len(parsers) != 1:
+        raise RuntimeError(
+            f"Expected exactly one M3uParser.smali, found {len(parsers)}"
+        )
+
+    path = parsers[0]
+    text = path.read_text(encoding="utf-8")
+
+    if "M3uNormalizer;->normalize" in text:
+        print("M3U normalization already injected:", path)
+        return
+
+    method_re = re.compile(
+        r"(?ms)^\.method[^\n]*Ljava/lang/String;[^\n]*\n"
+        r".*?"
+        r"^\.end method"
+    )
+
+    candidates = []
+
+    for match in method_re.finditer(text):
+        block = match.group(0)
+        header = block.split("\n", 1)[0]
+
+        if "Ljava/lang/String;" not in header:
+            continue
+
+        if (
+            "Ljava/util/List;" not in header
+            and "Ljava/util/Collection;" not in header
+            and "Lcom/example/data/iptv/" not in header
+            and ")Ljava/lang/Object;" not in header
+        ):
+            continue
+
+        candidates.append(match)
+
+    if not candidates:
+        raise RuntimeError(
+            "Could not identify String-based M3uParser method"
+        )
+
+    selected = None
+
+    for match in candidates:
+        if (
+            "EXTINF" in match.group(0)
+            or "EXTGRP" in match.group(0)
+        ):
+            selected = match
+            break
+
+    if selected is None:
+        selected = candidates[0]
+
+    block = selected.group(0)
+    header = block.split("\n", 1)[0]
+
+    params = header[
+        header.find("(") + 1:
+        header.rfind(")")
+    ]
+
+    register = 0 if " static " in header else 1
+    i = 0
+    string_register = None
+
+    while i < len(params):
+
+        if params.startswith("Ljava/lang/String;", i):
+            string_register = register
+            break
+
+        c = params[i]
+
+        if c in "ZBCSI":
+            register += 1
+            i += 1
+
+        elif c in "FDJ":
+            register += 2
+            i += 1
+
+        elif c == "L":
+            end = params.find(";", i)
+            if end < 0:
+                break
+            register += 1
+            i = end + 1
+
+        elif c == "[":
+            i += 1
+
+            while i < len(params) and params[i] == "[":
+                i += 1
+
+            if i < len(params) and params[i] == "L":
+                end = params.find(";", i)
+                if end < 0:
+                    break
+                i = end + 1
+            else:
+                i += 1
+
+            register += 1
+
+        else:
+            i += 1
+
+    if string_register is None:
+        raise RuntimeError(
+            "String parameter not found"
+        )
+
+    lines = block.splitlines(True)
+
+    insert_index = None
+
+    for n, line in enumerate(lines):
+        if line.startswith(".registers ") or line.startswith(".locals "):
+            insert_index = n + 1
+            break
+
+    if insert_index is None:
+        raise RuntimeError(
+            "No .registers/.locals found"
+        )
+
+    lines.insert(
+        insert_index,
+        "    invoke-static {p%d}, "
+        "Lcom/example/utils/M3uNormalizer;->normalize("
+        "Ljava/lang/String;)Ljava/lang/String;\n"
+        "    move-result-object p%d\n"
+        % (string_register, string_register)
+    )
+
+    new_block = "".join(lines)
+
+    text = (
+        text[:selected.start()]
+        + new_block
+        + text[selected.end():]
+    )
+
+    path.write_text(text, encoding="utf-8")
+
+    print(
+        "M3U normalization injected:",
+        path,
+        "p" + str(string_register)
+    )
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: patch_smali.py <baksmali-output-dir>", file=sys.stderr)
         return 2
     root = Path(sys.argv[1]).resolve()
+    patch_m3u_parser(root)
     if not root.is_dir():
         print(f"ERROR: no directory: {root}", file=sys.stderr)
         return 2
