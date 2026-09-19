@@ -2,7 +2,6 @@ name: Build RuVideoHub 3.6.21 - Smart Search No Update
 
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
 
@@ -51,7 +50,7 @@ export PATH="$HOME/bin:$PATH"
         run: |
           set -euo pipefail
           rm -rf work
-          apktool d input/RuVideoHub_3.6.21.apk \
+          "$HOME/bin/apktool" d input/RuVideoHub_3.6.21.apk \
             -o work
 
           test -f work/AndroidManifest.xml
@@ -93,7 +92,7 @@ export PATH="$HOME/bin:$PATH"
         shell: bash
         run: |
           set -euo pipefail
-          apktool b work -o unsigned.apk
+          "$HOME/bin/apktool" b work -o unsigned.apk
           test -f unsigned.apk
 
       - name: Inject SmartSearch classes3.dex
