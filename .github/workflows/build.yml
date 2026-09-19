@@ -2,9 +2,6 @@ name: Build RuVideoHub 3.6.21 - Smart Search No Update
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -46,7 +43,8 @@ jobs:
           EOF
           chmod +x "$HOME/bin/apktool"
           echo "$HOME/bin" >> "$GITHUB_PATH"
-          apktool --version
+export PATH="$HOME/bin:$PATH"
+          "$HOME/bin/apktool" --version
 
       - name: Decode exact official APK
         shell: bash
