@@ -323,7 +323,7 @@ def patch_m3u_parser(root):
     insert_index = None
 
     for n, line in enumerate(lines):
-        if line.startswith(".registers ") or line.startswith(".locals "):
+        if line.strip().startswith(".registers ") or line.strip().startswith(".locals "):
             insert_index = n + 1
             break
 
